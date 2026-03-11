@@ -89,6 +89,10 @@ props.sessionExpiryInterval = 3600 # 1 hour
 connect!(client, properties=props)
 ```
 
+## Bugs / TODO
+
+1. Single buffered channel causes first matching topic to posibly read messages from other topics. TODO- Implement channel per topic buffering or cooperative channel reading.
+
 ## License
 
 MIT License
@@ -96,4 +100,5 @@ MIT License
 ## AI Disclosure
 
 Coauthored using AI
+
 
