@@ -24,7 +24,7 @@ A high-performance, full-featured MQTT 5.0 client library for the Julia programm
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/yourusername/MQTT2.jl") # Replace with actual URL
+Pkg.add(url="https://github.com/nas2011/MQTT2.jl")
 ```
 
 ## Example Usage
@@ -92,3 +92,8 @@ connect!(client, properties=props)
 ## License
 
 MIT License
+
+## AI Disclosure
+
+Coauthored using AI
+
