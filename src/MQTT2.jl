@@ -13,6 +13,6 @@ export QoS, qos0, qos1, qos2,
        UnsubscribePacket, UnsubackPacket, PingreqPacket, PingrespPacket, 
        DisconnectPacket, AuthPacket, Subscription
 export encodePacket, decodePacket
-export MqttClient,ClientConfig, connect!, publish!, subscribe!, disconnect!
+export MqttClient,ClientConfig, connect!, publish!, subscribe!, disconnect!,unsubscribe!
 
 end
