@@ -71,9 +71,9 @@ function encodeProperties(props::Properties)
         writeUint16(buf, UInt16(length(props.correlationData)))
         write(buf, props.correlationData)
     end
-    if !isnothing(props.subscriptionIdentifier)
+    for id in props.subscriptionIdentifiers
         write(buf, SUBSCRIPTION_IDENTIFIER)
-        write(buf, encodeVbi(props.subscriptionIdentifier))
+        write(buf, encodeVbi(id))
     end
     if !isnothing(props.assignedClientIdentifier)
         write(buf, ASSIGNED_CLIENT_IDENTIFIER)
@@ -149,7 +149,7 @@ function decodeProperties(stream::IO)
             vlen = readUint16(buf)
             props.correlationData = read(buf, vlen)
         elseif id == SUBSCRIPTION_IDENTIFIER
-            props.subscriptionIdentifier = decodeVbi(buf)
+            push!(props.subscriptionIdentifiers, decodeVbi(buf))
         elseif id == ASSIGNED_CLIENT_IDENTIFIER
             props.assignedClientIdentifier = decodeString(buf)
         elseif id == SERVER_KEEP_ALIVE

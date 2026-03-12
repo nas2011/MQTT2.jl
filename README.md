@@ -14,7 +14,8 @@ A high-performance, full-featured MQTT 5.0 client library for the Julia programm
 
 ## Features
 
-- **Full MQTT 5.0 Support**: Includes support for Properties, User Properties, and Reason Codes.
+- **Full MQTT 5.0 Support**: Includes support for Properties, User Properties, Reason Codes, and Subscription Identifiers.
+- **Deduplicated Message Routing**: Uses MQTT 5.0 Subscription Identifiers to ensure messages are only delivered once to a client, even with overlapping topic filters.
 - **Auto-Keep-Alive**: Automatically manages `PINGREQ`/`PINGRESP` exchanges in the background.
 - **Topic-Specific Handlers**: Register unique callback functions for different topic filters.
 - **Global Handler**: Optional catch-all handler for all incoming messages.
@@ -91,7 +92,7 @@ connect!(client, properties=props)
 
 ## Bugs / TODO
 
-1. Single buffered channel causes first matching topic to posibly read messages from other topics. TODO- Implement channel per topic buffering or cooperative channel reading.
+1. Implement persistent session support (storing unacknowledged messages).
 
 ## License
 

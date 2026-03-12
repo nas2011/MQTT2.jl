@@ -20,7 +20,7 @@ mutable struct Properties
     contentType::Union{Nothing, String}
     responseTopic::Union{Nothing, String}
     correlationData::Union{Nothing, Vector{UInt8}}
-    subscriptionIdentifier::Union{Nothing, Int} # Variable Byte Integer
+    subscriptionIdentifiers::Vector{Int} # Variable Byte Integer(s)
     assignedClientIdentifier::Union{Nothing, String}
     serverKeepAlive::Union{Nothing, UInt16}
     reasonString::Union{Nothing, String}
@@ -29,7 +29,7 @@ mutable struct Properties
     function Properties()
         new(nothing, nothing, nothing, nothing, nothing, nothing, nothing, 
             Pair{String, String}[], nothing, nothing, nothing, nothing, 
-            nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+            nothing, nothing, nothing, Int[], nothing, nothing, nothing, nothing)
     end
 end
 

@@ -15,6 +15,23 @@ Base.@kwdef struct ClientConfig
 end
 
 """
+    TopicSubscription
+
+Internal representation of a subscription with its own buffering channel and task.
+"""
+mutable struct TopicSubscription
+    topicFilter::String
+    handler::Function
+    channel::Channel{PublishPacket}
+    task::Union{Nothing, Task}
+    subscriptionIdentifier::Union{Nothing, Int}
+
+    function TopicSubscription(filter::String, handler::Function, channelSize::Int; subscriptionIdentifier=nothing)
+        new(filter, handler, Channel{PublishPacket}(channelSize), nothing, subscriptionIdentifier)
+    end
+end
+
+"""
     MqttClient
 
 An MQTT 5.0 client instance.
@@ -24,22 +41,19 @@ mutable struct MqttClient
     socket::Union{Nothing, TCPSocket}
     connected::Bool
     packetIdCounter::UInt16
+    subscriptionIdCounter::Int
     
     # Tasks
     readTask::Union{Nothing, Task}
     keepAliveTask::Union{Nothing, Task}
-    dispatcherTask::Union{Nothing, Task}
-    
-    # Message buffering
-    messageChannel::Channel{PublishPacket}
     
     # Global handler for all messages
     onMessage::Union{Nothing, Function}
     # Topic-specific handlers
-    subscriptions::Dict{String, Function}
+    subscriptions::Vector{TopicSubscription}
 
-    function MqttClient(config::ClientConfig; channelSize=1024)
-        new(config, nothing, false, 1, nothing, nothing, nothing, Channel{PublishPacket}(channelSize), nothing, Dict{String, Function}())
+    function MqttClient(config::ClientConfig)
+        new(config, nothing, false, 1, 1, nothing, nothing, nothing, TopicSubscription[])
     end
 end
 
@@ -69,7 +83,6 @@ function connect!(client::MqttClient; cleanStart=true, properties=Properties(), 
             client.connected = true
             # Start background tasks
             client.readTask = Threads.@spawn clientReader(client)
-            client.dispatcherTask = Threads.@spawn messageDispatcher(client)
             if client.config.keepAlive > 0
                 client.keepAliveTask = Threads.@spawn pingLoop(client)
             end
@@ -83,39 +96,6 @@ function connect!(client::MqttClient; cleanStart=true, properties=Properties(), 
         close(client.socket)
         client.socket = nothing
         error("Expected CONNACK, got $(typeof(ack))")
-    end
-end
-
-"""
-    messageDispatcher(client::MqttClient)
-
-Background task that processes messages from the messageChannel.
-"""
-function messageDispatcher(client::MqttClient)
-    try
-        for p in client.messageChannel
-            # Global handler
-            if !isnothing(client.onMessage)
-                try
-                    Base.invokelatest(client.onMessage, p)
-                catch e
-                    @error "Error in global onMessage handler" exception=(e, catch_backtrace())
-                end
-            end
-            
-            # Topic-specific handlers
-            for (filter, handler) in client.subscriptions
-                if topicMatches(p.topic, filter)
-                    try
-                        Base.invokelatest(handler, p)
-                    catch e
-                        @error "Error in subscription handler for filter '$filter'" exception=(e, catch_backtrace())
-                    end
-                end
-            end
-        end
-    catch e
-        @error "MqttClient dispatcher error" exception=(e, catch_backtrace())
     end
 end
 
@@ -136,7 +116,10 @@ function clientReader(client::MqttClient)
         end
     finally
         client.connected = false
-        close(client.messageChannel) # Stop dispatcher
+        # Stop all subscription dispatchers
+        for sub in client.subscriptions
+            close(sub.channel)
+        end
         if !isnothing(client.socket)
             close(client.socket)
         end
@@ -167,15 +150,66 @@ function pingLoop(client::MqttClient)
     end
 end
 
+packetCount = 0
+
 """
     handleIncoming(client::MqttClient, packet::AbstractMqttPacket)
 
 Dispatches incoming packets to handlers.
 """
 function handleIncoming(client::MqttClient, p::PublishPacket)
-    # Push to buffer for background processing
-    if isopen(client.messageChannel)
-        put!(client.messageChannel, p)
+    @debug "global packet count: $(packetCount)"
+    global packetCount +=1
+    # Global handler
+    if !isnothing(client.onMessage)
+        p_global = deepcopy(p)
+        Threads.@spawn try
+            Base.invokelatest(client.onMessage, p_global)
+        catch e
+            @error "Error in global onMessage handler" exception=(e, catch_backtrace())
+        end
+    end
+    
+    # Topic-specific handlers: Distribute to each matching subscription's channel
+    if !isempty(p.properties.subscriptionIdentifiers)
+        # MQTT 5.0 routing via subscription identifiers (prevents duplicate delivery from broker)
+        for id in p.properties.subscriptionIdentifiers
+            for sub in client.subscriptions
+                if sub.subscriptionIdentifier == id
+                    if isopen(sub.channel)
+                        p_sub = deepcopy(p)
+                        Threads.@spawn try
+                            put!(sub.channel, p_sub)
+                        catch e
+                            if isopen(sub.channel)
+                                @error "Error putting message into sub-channel for '$(sub.topicFilter)'" exception=(e, catch_backtrace())
+                            end
+                        end
+                    end
+                    # Found the matching sub, break inner loop for this ID
+                    break
+                end
+            end
+        end
+    else
+        # Fallback to topic matching (for brokers not supporting identifiers or if not assigned)
+        for sub in client.subscriptions
+            if topicMatches(p.topic, sub.topicFilter)
+                @debug ("packet topic ", p.topic, " matches sub topic: ", sub.topicFilter)
+                if isopen(sub.channel)
+                    # Use Threads.@spawn to avoid blocking the network reader if a sub-channel is full
+                    p_sub = deepcopy(p)
+                    Threads.@spawn try
+                        @debug ("Putting to ", sub.topicFilter, " " , sub.channel, " with length " , sub.channel.n_avail_items)
+                        put!(sub.channel, p_sub)
+                    catch e
+                        if isopen(sub.channel)
+                            @error "Error putting message into sub-channel for '$(sub.topicFilter)'" exception=(e, catch_backtrace())
+                        end
+                    end
+                end
+            end
+        end
     end
     
     # Auto-ack if QoS > 0 (done immediately to free up the broker)
@@ -230,12 +264,28 @@ function publish!(client::MqttClient, topic::String, payload::Vector{UInt8}; qos
     return pid
 end
 
+function startSubscriptionTask!(sub::TopicSubscription)
+    sub.task = Threads.@spawn begin
+        try
+            for p in sub.channel
+                try
+                    Base.invokelatest(sub.handler, p)
+                catch e
+                    @error "Error in subscription handler for filter '$(sub.topicFilter)'" exception=(e, catch_backtrace())
+                end
+            end
+        catch e
+            @error "Error in subscription task for filter '$(sub.topicFilter)'" exception=(e, catch_backtrace())
+        end
+    end
+end
+
 """
-    subscribe!(client::MqttClient, topicFilter::String, handler::Function; qos=qos0, properties=Properties())
+    subscribe!(client::MqttClient, topicFilter::String, handler::Function; qos=qos0, properties=Properties(), channelSize=1024)
 
 Subscribes to a topic filter with a specific handler function.
 """
-function subscribe!(client::MqttClient, topicFilter::String, handler::Function; qos=qos0, properties=Properties())
+function subscribe!(client::MqttClient, topicFilter::String, handler::Function; qos=qos0, properties=Properties(), channelSize=1024)
     if !client.connected
         error("Client not connected")
     end
@@ -244,8 +294,16 @@ function subscribe!(client::MqttClient, topicFilter::String, handler::Function; 
     client.packetIdCounter += 1
     if client.packetIdCounter == 0 client.packetIdCounter = 1 end
     
-    # Store handler
-    client.subscriptions[topicFilter] = handler
+    subId = client.subscriptionIdCounter
+    client.subscriptionIdCounter += 1
+    
+    # Create and start new subscription
+    sub = TopicSubscription(topicFilter, handler, channelSize; subscriptionIdentifier=subId)
+    push!(client.subscriptions, sub)
+    startSubscriptionTask!(sub)
+    
+    # Add subscription identifier to properties for the SUBSCRIBE packet
+    push!(properties.subscriptionIdentifiers, subId)
     
     subs = [Subscription(topicFilter=topicFilter, qos=qos)]
     p = SubscribePacket(packetIdentifier=pid, properties=properties, subscriptions=subs)
@@ -269,9 +327,15 @@ function unsubscribe!(client::MqttClient, topicFilters::Vector{String}; properti
     client.packetIdCounter += 1
     if client.packetIdCounter == 0 client.packetIdCounter = 1 end
     
-    # Remove handlers
+    # Remove handlers and stop tasks
     for tf in topicFilters
-        delete!(client.subscriptions, tf)
+        filter!(client.subscriptions) do sub
+            if sub.topicFilter == tf
+                close(sub.channel)
+                return false
+            end
+            return true
+        end
     end
     
     p = UnsubscribePacket(packetIdentifier=pid, properties=properties, topicFilters=topicFilters)
