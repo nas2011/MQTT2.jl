@@ -91,6 +91,34 @@ function encodeProperties(props::Properties)
         write(buf, WILL_DELAY_INTERVAL)
         writeUint32(buf, props.willDelayInterval)
     end
+    if !isnothing(props.responseInformation)
+        write(buf, RESPONSE_INFORMATION)
+        write(buf, encodeString(props.responseInformation))
+    end
+    if !isnothing(props.serverReference)
+        write(buf, SERVER_REFERENCE)
+        write(buf, encodeString(props.serverReference))
+    end
+    if !isnothing(props.maximumQos)
+        write(buf, MAXIMUM_QOS)
+        write(buf, props.maximumQos)
+    end
+    if !isnothing(props.retainAvailable)
+        write(buf, RETAIN_AVAILABLE)
+        write(buf, props.retainAvailable)
+    end
+    if !isnothing(props.wildcardSubscriptionAvailable)
+        write(buf, WILDCARD_SUBSCRIPTION_AVAILABLE)
+        write(buf, props.wildcardSubscriptionAvailable)
+    end
+    if !isnothing(props.subscriptionIdentifierAvailable)
+        write(buf, SUBSCRIPTION_IDENTIFIER_AVAILABLE)
+        write(buf, props.subscriptionIdentifierAvailable)
+    end
+    if !isnothing(props.sharedSubscriptionAvailable)
+        write(buf, SHARED_SUBSCRIPTION_AVAILABLE)
+        write(buf, props.sharedSubscriptionAvailable)
+    end
 
     propsBytes = take!(buf)
     vbiLen = encodeVbi(length(propsBytes))
@@ -158,6 +186,20 @@ function decodeProperties(stream::IO)
             props.reasonString = decodeString(buf)
         elseif id == WILL_DELAY_INTERVAL
             props.willDelayInterval = readUint32(buf)
+        elseif id == RESPONSE_INFORMATION
+            props.responseInformation = decodeString(buf)
+        elseif id == SERVER_REFERENCE
+            props.serverReference = decodeString(buf)
+        elseif id == MAXIMUM_QOS
+            props.maximumQos = read(buf, UInt8)
+        elseif id == RETAIN_AVAILABLE
+            props.retainAvailable = read(buf, UInt8)
+        elseif id == WILDCARD_SUBSCRIPTION_AVAILABLE
+            props.wildcardSubscriptionAvailable = read(buf, UInt8)
+        elseif id == SUBSCRIPTION_IDENTIFIER_AVAILABLE
+            props.subscriptionIdentifierAvailable = read(buf, UInt8)
+        elseif id == SHARED_SUBSCRIPTION_AVAILABLE
+            props.sharedSubscriptionAvailable = read(buf, UInt8)
         else
             error("Unknown Property Identifier: $id")
         end
