@@ -26,9 +26,11 @@ mutable struct TopicSubscription
     channel::Channel{PublishPacket}
     task::Union{Nothing, Task}
     subscriptionIdentifier::Union{Nothing, Int}
+    qos::QoS
+    properties::Properties
 
-    function TopicSubscription(filter::String, handler::Function, channelSize::Int; subscriptionIdentifier=nothing)
-        new(filter, handler, Channel{PublishPacket}(channelSize), nothing, subscriptionIdentifier)
+    function TopicSubscription(filter::String, handler::Function, channelSize::Int, qos::QoS, properties::Properties; subscriptionIdentifier=nothing)
+        new(filter, handler, Channel{PublishPacket}(channelSize), nothing, subscriptionIdentifier, qos, properties)
     end
 end
 
@@ -50,11 +52,16 @@ mutable struct MqttClient
     
     # Global handler for all messages
     onMessage::Union{Nothing, Function}
+    # Lifecycle callbacks
+    onConnect::Union{Nothing, Function}
+    onDisconnect::Union{Nothing, Function}
     # Topic-specific handlers
     subscriptions::Vector{TopicSubscription}
+    # In-flight QoS 1/2 messages
+    inflightMessages::Dict{UInt16, PublishPacket}
 
     function MqttClient(config::ClientConfig)
-        new(config, nothing, false, 1, 1, nothing, nothing, nothing, TopicSubscription[])
+        new(config, nothing, false, 1, 1, nothing, nothing, nothing, nothing, nothing, TopicSubscription[], Dict{UInt16, PublishPacket}())
     end
 end
 
@@ -87,6 +94,16 @@ function connect!(client::MqttClient; cleanStart=true, properties=Properties(), 
             if client.config.keepAlive > 0
                 client.keepAliveTask = Threads.@spawn pingLoop(client)
             end
+            
+            # Trigger onConnect callback
+            if !isnothing(client.onConnect)
+                Threads.@spawn try
+                    Base.invokelatest(client.onConnect, client, ack)
+                catch e
+                    @error "Error in onConnect handler" exception=(e, catch_backtrace())
+                end
+            end
+            
             return ack
         else
             close(client.socket)
@@ -148,11 +165,37 @@ function reconnect!(client::MqttClient)
                         client.packetIdCounter += 1
                         if client.packetIdCounter == 0 client.packetIdCounter = 1 end
                         
-                        subs = [Subscription(topicFilter=sub.topicFilter, qos=qos0)] # Defaulting to qos0 for now, should ideally store QoS
-                        p = SubscribePacket(packetIdentifier=pid, subscriptions=subs)
+                        subs = [Subscription(topicFilter=sub.topicFilter, qos=sub.qos)]
+                        p = SubscribePacket(packetIdentifier=pid, properties=sub.properties, subscriptions=subs)
                         write(client.socket, encodePacket(p))
                     end
                 end
+
+                # Replay inflight messages
+                for (pid, p) in client.inflightMessages
+                    @info "Replaying inflight message $(p.packetIdentifier) to $(p.topic)"
+                    # Create a copy with DUP=true
+                    dup_p = PublishPacket(
+                        dup = true,
+                        qos = p.qos,
+                        retain = p.retain,
+                        topic = p.topic,
+                        packetIdentifier = p.packetIdentifier,
+                        properties = p.properties,
+                        payload = p.payload
+                    )
+                    write(client.socket, encodePacket(dup_p))
+                end
+
+                # Trigger onConnect callback
+                if !isnothing(client.onConnect)
+                    Threads.@spawn try
+                        Base.invokelatest(client.onConnect, client, ack)
+                    catch e
+                        @error "Error in onConnect handler" exception=(e, catch_backtrace())
+                    end
+                end
+
                 return true
             end
         catch e
@@ -185,6 +228,16 @@ function clientReader(client::MqttClient)
             
             # If we reach here, the connection is lost
             client.connected = false
+            
+            # Trigger onDisconnect callback
+            if !isnothing(client.onDisconnect)
+                Threads.@spawn try
+                    Base.invokelatest(client.onDisconnect, client)
+                catch e
+                    @error "Error in onDisconnect handler" exception=(e, catch_backtrace())
+                end
+            end
+
             if !isnothing(client.socket)
                 try close(client.socket) catch end
                 client.socket = nothing
@@ -299,13 +352,37 @@ function handleIncoming(client::MqttClient, p::PublishPacket)
         ack = PubackPacket(packetIdentifier = p.packetIdentifier)
         write(client.socket, encodePacket(ack))
     elseif p.qos == qos2
+        # For incoming QoS 2, we send PUBREC, then wait for PUBREL, then send PUBCOMP.
+        # This implementation currently does a simplified version: send PUBREC.
+        # The broker will send PUBREL when it receives our PUBREC.
         rec = PubrecPacket(packetIdentifier = p.packetIdentifier)
         write(client.socket, encodePacket(rec))
     end
 end
 
 function handleIncoming(client::MqttClient, p::PubackPacket)
-    # Placeholder for tracking sent messages
+    delete!(client.inflightMessages, p.packetIdentifier)
+end
+
+function handleIncoming(client::MqttClient, p::PubrecPacket)
+    # Received PUBREC in response to our PUBLISH (QoS 2)
+    # We must send PUBREL
+    rel = PubrelPacket(packetIdentifier = p.packetIdentifier)
+    write(client.socket, encodePacket(rel))
+end
+
+function handleIncoming(client::MqttClient, p::PubrelPacket)
+    # Received PUBREL from broker (either response to our PUBREC for incoming, 
+    # or broker initiated for outgoing if we were the receiver)
+    # We must send PUBCOMP
+    comp = PubcompPacket(packetIdentifier = p.packetIdentifier)
+    write(client.socket, encodePacket(comp))
+end
+
+function handleIncoming(client::MqttClient, p::PubcompPacket)
+    # Received PUBCOMP in response to our PUBREL (QoS 2)
+    # Transaction complete, remove from inflight
+    delete!(client.inflightMessages, p.packetIdentifier)
 end
 
 function handleIncoming(client::MqttClient, p::PingrespPacket)
@@ -341,6 +418,10 @@ function publish!(client::MqttClient, topic::String, payload::Vector{UInt8}; qos
         packetIdentifier = pid,
         properties = properties
     )
+    
+    if qos > qos0
+        client.inflightMessages[pid] = p
+    end
     
     write(client.socket, encodePacket(p))
     return pid
@@ -388,13 +469,13 @@ function subscribe!(client::MqttClient, topicFilter::String, handler::Function; 
     subId = client.subscriptionIdCounter
     client.subscriptionIdCounter += 1
     
-    # Create and start new subscription
-    sub = TopicSubscription(topicFilter, handler, channelSize; subscriptionIdentifier=subId)
-    push!(client.subscriptions, sub)
-    startSubscriptionTask!(sub)
-    
     # Add subscription identifier to properties for the SUBSCRIBE packet
     push!(properties.subscriptionIdentifiers, subId)
+    
+    # Create and start new subscription
+    sub = TopicSubscription(topicFilter, handler, channelSize, qos, deepcopy(properties); subscriptionIdentifier=subId)
+    push!(client.subscriptions, sub)
+    startSubscriptionTask!(sub)
     
     subs = [Subscription(topicFilter=topicFilter, qos=qos)]
     p = SubscribePacket(packetIdentifier=pid, properties=properties, subscriptions=subs)

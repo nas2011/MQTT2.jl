@@ -3,13 +3,14 @@
 This document outlines the planned improvements and features for the MQTT2.jl library. These enhancements aim to make the client more robust, secure, and fully compliant with advanced MQTT 5.0 features.
 
 ## 1. Auto-Reconnect and Session Resumption
-*   **Feature:** Implement an automatic reconnection mechanism with exponential backoff and MQTT 5.0 session resumption support.
+*   **Feature:** Implement an automatic reconnection mechanism with exponential backoff (3^n seconds) and MQTT 5.0 session resumption support.
 *   **Why it's useful:** Ensures high availability in unstable network environments. Session resumption (Clean Start = false) allows the client to retrieve missed messages and maintain subscriptions without re-subscribing.
 *   **Implementation Requirements:**
-    *   Add a `reconnectLoop` in `client.jl`.
-    *   Maintain a state of unacknowledged QoS 1/2 messages.
-    *   Store active subscriptions to replay them if the session cannot be resumed.
-    *   Expose `onConnect` and `onDisconnect` callbacks.
+    *   [x] Add a `reconnectLoop` in `client.jl`.
+    * [x] Maintain a state of unacknowledged QoS 1/2 messages for session resumption.
+    *   [x] Update `TopicSubscription` to store original `QoS` and `Properties` for faithful re-subscription.
+    * [x] Store active subscriptions to replay them if the session cannot be resumed (`sessionPresent=false`).
+    * [x] Expose `onConnect` and `onDisconnect` callbacks in `MqttClient`.
 
 ## 2. TLS/SSL Security
 *   **Feature:** Integration with `MbedTLS.jl` or `OpenSSL.jl` for encrypted communication (port 8883).
