@@ -25,11 +25,12 @@ mutable struct Properties
     serverKeepAlive::Union{Nothing, UInt16}
     reasonString::Union{Nothing, String}
     willDelayInterval::Union{Nothing, UInt32}
+    retainAvailable::Union{Nothing,UInt8}
 
     function Properties()
         new(nothing, nothing, nothing, nothing, nothing, nothing, nothing, 
             Pair{String, String}[], nothing, nothing, nothing, nothing, 
-            nothing, nothing, nothing, Int[], nothing, nothing, nothing, nothing)
+            nothing, nothing, nothing, Int[], nothing, nothing, nothing, nothing,nothing)
     end
 end
 
