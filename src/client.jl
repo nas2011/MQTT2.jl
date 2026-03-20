@@ -12,6 +12,7 @@ Base.@kwdef struct ClientConfig
     password::Union{Nothing, String} = nothing
     keepAlive::Int = 60
     clientId::String = "julia_$(randstring(8))"
+    reconnectAttempts::Int = 5
 end
 
 """
@@ -100,19 +101,100 @@ function connect!(client::MqttClient; cleanStart=true, properties=Properties(), 
 end
 
 """
+    reconnect!(client::MqttClient)
+
+Internal helper to reconnect the client after a connection loss.
+"""
+function reconnect!(client::MqttClient)
+    attempts = 0
+    maxAttempts = client.config.reconnectAttempts
+    
+    while attempts < maxAttempts
+        attempts += 1
+        backoff = 3^attempts # Exponential backoff: 3, 9, 27, 81, 243... seconds
+        @info "Attempting to reconnect (attempt $attempts/$maxAttempts) in $backoff seconds..."
+        sleep(backoff)
+        
+        try
+            # Re-use the existing connect! logic but without starting new tasks yet
+            # We need to be careful not to leak tasks.
+            # Actually, it's simpler to just perform the low-level connection here.
+            client.socket = Sockets.connect(client.config.host, client.config.port)
+            
+            cp = ConnectPacket(
+                clientId = client.config.clientId,
+                cleanStart = false, # Resume session if possible
+                keepAlive = client.config.keepAlive,
+                username = client.config.username,
+                password = client.config.password
+            )
+            write(client.socket, encodePacket(cp))
+            
+            ack = decodePacket(client.socket)
+            if ack isa ConnackPacket && ack.reasonCode == 0x00
+                @info "Reconnected successfully."
+                client.connected = true
+                # Restart ping loop if needed
+                if client.config.keepAlive > 0
+                    client.keepAliveTask = Threads.@spawn pingLoop(client)
+                end
+                
+                # Re-subscribe to existing filters if it was a clean start or session expired
+                if !ack.sessionPresent
+                    for sub in client.subscriptions
+                        @info "Re-subscribing to $(sub.topicFilter)"
+                        # Note: This might need a new packet ID, but we'll use the current counter
+                        pid = client.packetIdCounter
+                        client.packetIdCounter += 1
+                        if client.packetIdCounter == 0 client.packetIdCounter = 1 end
+                        
+                        subs = [Subscription(topicFilter=sub.topicFilter, qos=qos0)] # Defaulting to qos0 for now, should ideally store QoS
+                        p = SubscribePacket(packetIdentifier=pid, subscriptions=subs)
+                        write(client.socket, encodePacket(p))
+                    end
+                end
+                return true
+            end
+        catch e
+            @warn "Reconnection attempt $attempts failed" exception=(e, catch_backtrace())
+        end
+    end
+    
+    @error "Failed to reconnect after $maxAttempts attempts."
+    return false
+end
+
+"""
     clientReader(client::MqttClient)
 
 Internal loop to read incoming packets from the socket.
 """
 function clientReader(client::MqttClient)
     try
-        while client.connected && !eof(client.socket)
-            packet = decodePacket(client.socket)
-            handleIncoming(client, packet)
-        end
-    catch e
-        if client.connected
-            @error "MqttClient reader error" exception=(e, catch_backtrace())
+        while true
+            try
+                while client.connected && !eof(client.socket)
+                    packet = decodePacket(client.socket)
+                    handleIncoming(client, packet)
+                end
+            catch e
+                if client.connected
+                    @error "MqttClient reader error" exception=(e, catch_backtrace())
+                end
+            end
+            
+            # If we reach here, the connection is lost
+            client.connected = false
+            if !isnothing(client.socket)
+                try close(client.socket) catch end
+                client.socket = nothing
+            end
+            
+            # Try to reconnect
+            if !reconnect!(client)
+                break # Give up after max attempts
+            end
+            # If reconnect! succeeded, client.connected is true again and we continue the outer loop
         end
     finally
         client.connected = false
@@ -121,7 +203,7 @@ function clientReader(client::MqttClient)
             close(sub.channel)
         end
         if !isnothing(client.socket)
-            close(client.socket)
+            try close(client.socket) catch end
         end
     end
 end
