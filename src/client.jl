@@ -1,4 +1,5 @@
 using Random
+using JSON3
 
 """
     ClientConfig
@@ -13,6 +14,13 @@ Base.@kwdef struct ClientConfig
     keepAlive::Int = 60
     clientId::String = "julia_$(randstring(8))"
     reconnectAttempts::Int = 5
+    
+    # Last Will and Testament
+    willTopic::Union{Nothing, String} = nothing
+    willPayload::Union{Nothing, Vector{UInt8}, String} = nothing
+    willQos::QoS = qos0
+    willRetain::Bool = false
+    willProperties::Properties = Properties()
 end
 
 """
@@ -79,7 +87,13 @@ function connect!(client::MqttClient; cleanStart=true, properties=Properties(), 
         keepAlive = client.config.keepAlive,
         properties = properties,
         username = username,
-        password = password
+        password = password,
+        willFlag = !isnothing(client.config.willTopic),
+        willQos = client.config.willQos,
+        willRetain = client.config.willRetain,
+        willProperties = client.config.willProperties,
+        willTopic = client.config.willTopic,
+        willPayload = client.config.willPayload
     )
     
     write(client.socket, encodePacket(cp))
@@ -143,7 +157,13 @@ function reconnect!(client::MqttClient)
                 cleanStart = false, # Resume session if possible
                 keepAlive = client.config.keepAlive,
                 username = client.config.username,
-                password = client.config.password
+                password = client.config.password,
+                willFlag = !isnothing(client.config.willTopic),
+                willQos = client.config.willQos,
+                willRetain = client.config.willRetain,
+                willProperties = client.config.willProperties,
+                willTopic = client.config.willTopic,
+                willPayload = client.config.willPayload
             )
             write(client.socket, encodePacket(cp))
             
@@ -434,6 +454,25 @@ Convenience function to publish a string payload. Converts the string to `Vector
 """
 function publish!(client::MqttClient, topic::String, payload::String; kwargs...)
     return publish!(client, topic, Vector{UInt8}(payload); kwargs...)
+end
+
+"""
+    publish!(client::MqttClient, topic::String, payload::Number; kwargs...)
+
+Convenience function to publish a numeric payload. Converts the number to its string representation and then to `Vector{UInt8}`.
+"""
+function publish!(client::MqttClient, topic::String, payload::Number; kwargs...)
+    return publish!(client, topic, string(payload); kwargs...)
+end
+
+"""
+    publish!(client::MqttClient, topic::String, payload::Vector{<:NamedTuple}; kwargs...)
+
+Convenience function to publish a JSON payload. If the vector has exactly one item, it is serialized as a single JSON object. Otherwise, it is serialized as a JSON array of objects.
+"""
+function publish!(client::MqttClient, topic::String, payload::Vector{<:NamedTuple}; kwargs...)
+    json_data = length(payload) == 1 ? payload[1] : payload
+    return publish!(client, topic, JSON3.write(json_data); kwargs...)
 end
 
 function startSubscriptionTask!(sub::TopicSubscription)
