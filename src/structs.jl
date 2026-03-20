@@ -92,9 +92,14 @@ struct ConnectPacket <: AbstractMqttPacket
         else
             password
         end
+        payload_bytes = if willPayload isa String
+            Vector{UInt8}(willPayload)
+        else
+            willPayload
+        end
         new(protocolName, UInt8(protocolVersion), cleanStart, UInt16(keepAlive), properties, 
             clientId, willFlag, willQos, willRetain, willProperties, 
-            willTopic, willPayload, username, pwd_bytes)
+            willTopic, payload_bytes, username, pwd_bytes)
     end
 end
 

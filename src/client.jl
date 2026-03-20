@@ -264,6 +264,15 @@ function publish!(client::MqttClient, topic::String, payload::Vector{UInt8}; qos
     return pid
 end
 
+"""
+    publish!(client::MqttClient, topic::String, payload::String; kwargs...)
+
+Convenience function to publish a string payload. Converts the string to `Vector{UInt8}`.
+"""
+function publish!(client::MqttClient, topic::String, payload::String; kwargs...)
+    return publish!(client, topic, Vector{UInt8}(payload); kwargs...)
+end
+
 function startSubscriptionTask!(sub::TopicSubscription)
     sub.task = Threads.@spawn begin
         try
