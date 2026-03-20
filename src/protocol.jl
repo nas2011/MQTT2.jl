@@ -158,6 +158,8 @@ function decodeProperties(stream::IO)
             props.reasonString = decodeString(buf)
         elseif id == WILL_DELAY_INTERVAL
             props.willDelayInterval = readUint32(buf)
+        elseif id == RETAIN_AVAILABLE
+            props.retainAvailable = read(buf,UInt8)
         else
             error("Unknown Property Identifier: $id")
         end
